@@ -10,8 +10,11 @@ classdef NeuralCodesFeatureExtractor < helpers.GenericInstaller ...
       'layerName', 'fc6'... % Layer which output is to be used as image descriptor
       );
     Net;
-    layerIndex;
     outputSize;
+  end
+  
+  properties (Hidden)
+    layerIndex;
   end
 
   methods
@@ -41,7 +44,7 @@ classdef NeuralCodesFeatureExtractor < helpers.GenericInstaller ...
       % Index of layer to be used
       obj.layerIndex = find(cellfun(@(layer) strcmp(layer.name, obj.Opts.layerName), obj.Net.layers));
       % Determine output size
-      obj.outputSize = size(obj.Net.layers{obj.layerIndex}.weights{2}, 2);
+      obj.outputSize = numel(obj.Net.layers{obj.layerIndex}.weights{2});
     end
 
     function [frames descriptors] = extractFeatures(obj, imagePath)
@@ -87,6 +90,7 @@ classdef NeuralCodesFeatureExtractor < helpers.GenericInstaller ...
         [frames descriptors] = obj.extractDescriptors(imagePath,frames);
       end
       timeElapsed = toc(startTime);
+      
       obj.debug(sprintf('Features from image %s computed in %gs',...
         getFileName(imagePath),timeElapsed));
       % Store the generated frames and descriptors to the cache.
@@ -108,11 +112,9 @@ classdef NeuralCodesFeatureExtractor < helpers.GenericInstaller ...
       % Prealocate descriptors
       
       descriptors = zeros(obj.outputSize, size(frames, 2), 'single');
-      patchArray = zeros([obj.Net.meta.normalization.imageSize, size(frames, 2)], 'single');
       
       if obj.Opts.useGpu
         descriptors = gpuArray(descriptors);
-        patchArray = gpuArray(patchArray);
       end
 
       % Compute the descriptors as mean and variance of the image box
@@ -126,23 +128,33 @@ classdef NeuralCodesFeatureExtractor < helpers.GenericInstaller ...
         patch = imresize(img(y-dy:y+dy, x-dx:x+dx, :),...
             [obj.Net.meta.normalization.imageSize(1), obj.Net.meta.normalization.imageSize(2)]);
         
-        if obj.Opts.useGpu
-            patchArray(:, :, :, fidx) = gpuArray(patch);
-        else
-            patchArray(:, :, :, fidx) = patch;
+        averageImage = obj.Net.meta.normalization.averageImage;
+      
+        if ismatrix(averageImage) && ndims(averageImage) < 3
+            repAverageImage = zeros(obj.Net.meta.normalization.imageSize);
+
+            for dim = 1:obj.Net.meta.normalization.imageSize(3)
+                repAverageImage(:, :, dim) = repmat(averageImage(dim), obj.Net.meta.normalization.imageSize(1:2));
+            end
+
+            averageImage = repAverageImage;
         end
+        
+        if obj.Opts.useGpu
+            patch = gpuArray(patch);
+            averageImage = gpuArray(averageImage);
+        end
+        
+        patch = patch - averageImage;    
+        nn_outputs = vl_simplenn(obj.Net, patch);
+        descriptor = nn_outputs(obj.layerIndex + 1).x;
+        descriptor = reshape(descriptor, [numel(descriptor), 1]);
+        descriptors(:, fidx) = descriptor / norm(descriptor);
         
       end
       
-      patchArray = bsxfun(@minus, patchArray, obj.Net.meta.normalization.averageImage);
-      
-      for fidx = 1:size(frames, 2)
-          nn_outputs = vl_simplenn(obj.Net, patchArray(:, :, :, fidx));
-          descriptors(:, fidx) = nn_outputs(obj.layerIndex + 1).x;
-      end
-      
       if obj.Opts.useGpu
-          descriptors = gather(descriptors);
+          descriptors = gather(descriptors);    
       end
       
       elapsedTime = toc(startTime);
