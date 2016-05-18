@@ -22,7 +22,7 @@ import benchmarks.*;
 % Define the features extractors which will be tested with the retrieval
 % benchmark.
 
-netPath = '/home/pdanilov/cbir_data/nets/imagenet-vgg-verydeep-16.mat';
+netPath = '/home/pdanilov/cbir_data/nets/imagenet-caffe-alex.mat';
 
 featExtractors{1} = VlFeatCovdet('method', 'hessianlaplace', ...
                                  'estimateaffineshape', true, ...
@@ -35,11 +35,11 @@ featExtractors{2} = VlFeatCovdet('method', 'harrislaplace', ...
                                  'peakthreshold',0.0000004,...
                                  'doubleImage', false);
 featExtractors{3} = VlFeatSift('PeakThresh',2);
-featExtractors{4} = NeuralCodesFeatureExtractor('levels', 1:3, ...
+featExtractors{4} = NeuralCodesFeatureExtractor('levels', 1, ...
                                                 'netPath', netPath, ...
-                                                'useGpu', false);
+                                                'useGpu', true);
                                             
-featExtractors{4}.disableCaching
+% featExtractors{4}.disableCaching
 
 % Define the benchmark class. This implements simple retrieval system which
 % uses extracted features in a K-Nearest Neighbour search in order to
