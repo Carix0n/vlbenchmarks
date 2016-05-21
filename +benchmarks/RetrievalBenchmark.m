@@ -555,6 +555,31 @@ classdef RetrievalBenchmark < benchmarks.GenericBenchmark ...
       [recall precision info] = vl_pr(rankedLabels, numImages:-1:1);
       ap = info.auc;
     end
-  end  
+    
+    function [auc, tpr, tnr] = rankedListRoc(query, rankedList)
+      % rankedListRoc Calculate roc-score of retrieved images
+      %   AUC = rankedListRoc(QUERY, RANKED_LIST) Compute area under ROC curve 
+      %   of retrieved images (their ids) by QUERY, sorted by their 
+      %   relevancy in RANKED_LIST.
+      %
+      %   [AUC TPR TNR] = rankedListAp(...) Return also true-positive and
+      %   true-negative rates.
+
+      % make sure each image appears at most once in the rankedList
+      [temp,inds]=unique(rankedList,'first');
+      rankedList= rankedList( sort(inds) );
+
+      numImages = numel(rankedList);
+      labels = - ones(1, numImages);
+      labels(query.good) = 1;
+      labels(query.ok) = 1;
+      labels(query.junk) = 0;
+      labels(query.imageId) = 1;
+      rankedLabels = labels(rankedList);
+
+      [tpr, tnr, info] = vl_roc(rankedLabels, numImages:-1:1);
+      auc = info.auc;
+    end
+  end
 end
 

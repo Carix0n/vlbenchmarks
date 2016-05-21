@@ -22,7 +22,13 @@ import benchmarks.*;
 % Define the features extractors which will be tested with the retrieval
 % benchmark.
 
-netPath = '/home/pdanilov/cbir_data/nets/imagenet-caffe-alex.mat';
+homePath = getenv('HOME');
+
+netDir = 'cbir_data/nets';
+
+netName = 'imagenet-caffe-alex.mat';
+
+netPath = fullfile(homePath, netDir, netName);
 
 featExtractors{1} = VlFeatCovdet('method', 'hessianlaplace', ...
                                  'estimateaffineshape', true, ...
@@ -35,11 +41,9 @@ featExtractors{2} = VlFeatCovdet('method', 'harrislaplace', ...
                                  'peakthreshold',0.0000004,...
                                  'doubleImage', false);
 featExtractors{3} = VlFeatSift('PeakThresh',2);
-featExtractors{4} = NeuralCodesFeatureExtractor('levels', 1, ...
+featExtractors{4} = NeuralCodesFeatureExtractor('levels', 1:3, ...
                                                 'netPath', netPath, ...
                                                 'useGpu', true);
-                                            
-% featExtractors{4}.disableCaching
 
 % Define the benchmark class. This implements simple retrieval system which
 % uses extracted features in a K-Nearest Neighbour search in order to
@@ -48,6 +52,7 @@ featExtractors{4} = NeuralCodesFeatureExtractor('levels', 1, ...
 % Parameter 'MaxNumImagesPerSearch' sets in how big chunks the dataset
 % should be divided for the KNN search.
 retBenchmark = RetrievalBenchmark('MaxNumImagesPerSearch',100);
+retBenchmarkCNN = RetrievalBenchmarkCNN('MaxNumImagesPerSearch',100);
 
 % Define the dataset which will be used for the benchmark. In this case we
 % will use 'oxbuild' dataset (Philbin, CVPR07) which originally consists
@@ -61,10 +66,16 @@ dataset = VggRetrievalDataset('Category','oxbuild',...
                               'BadImagesNum',100);
 
 % Run the test for all defined feature extractors
-for d=1:numel(featExtractors)
-  [mAP(d) info(d)] =...
+
+numExtractors = numel(featExtractors);
+
+for d=1:(numExtractors - 1)
+  [mAP(d), info(d)] =...
     retBenchmark.testFeatureExtractor(featExtractors{d}, dataset);
 end
+
+[mAP(numExtractors), info(numExtractors)] =...
+    retBenchmarkCNN.testFeatureExtractor(featExtractors{numExtractors}, dataset);
 
 % --------------------------------------------------------------------
 % PART 2: Average precisions
@@ -114,12 +125,22 @@ query = dataset.getQuery(queryNum);
 
 for d=1:numel(featExtractors)
   rankedList = info(d).rankedList(:,queryNum);
-  [ap recall(:,d) precision(:,d)] = ...
-    retBenchmark.rankedListAp(query, rankedList);
+  [~, recall(:,d), precision(:,d)] = retBenchmark.rankedListAp(query, rankedList);
 end
 figure(7); clf;
 plot(recall, precision,'LineWidth',2); 
-xlabel('recall'); ylabel('Precision');
+xlabel('Recall'); ylabel('Precision');
+grid on; legend(detNames,'Location','SW');
+helpers.printFigure(resultsPath,'prc',0.5);
+
+for d=1:numel(featExtractors)
+  rankedList = info(d).rankedList(:,queryNum);
+  [~, tpr(:,d), tnr(:,d)] = retBenchmark.rankedListRoc(query, rankedList);
+end
+figure(8); clf;
+plot(1 - tnr, tpr,'LineWidth',2);
+title('ROC-curve');
+xlabel('FPR'); ylabel('TPR');
 grid on; legend(detNames,'Location','SW');
 helpers.printFigure(resultsPath,'prc',0.5);
 

@@ -21,7 +21,7 @@ classdef RetrievalBenchmarkCNN < benchmarks.GenericBenchmark ...
   end
 
   methods
-    function obj = RetrievalBenchmark(varargin)
+    function obj = RetrievalBenchmarkCNN(varargin)
       import helpers.*;
       obj.BenchmarkName = 'RetrBenchmarkCNN';
       [obj.Opts varargin] = vl_argparse(obj.Opts,varargin);
@@ -29,12 +29,11 @@ classdef RetrievalBenchmarkCNN < benchmarks.GenericBenchmark ...
       obj.checkInstall(varargin);
     end
 
-    function [mAP, info] = ...
-        testFeatureExtractor(obj, featExtractor, dataset)
+    function [mAP, info] = testFeatureExtractor(obj, featExtractor, dataset)
       import helpers.*;
       
-      if exist('obj.Opts.levels', 'var')
-          obj.NumPatchesPerImage = sum(obj.Opts.levels .^ 2);
+      if isfield(featExtractor.Opts, 'levels')
+          obj.NumPatchesPerImage = sum(featExtractor.Opts.levels .^ 2);
       end
       
       obj.info('Evaluating detector %s on dataset %s.',...
@@ -61,8 +60,8 @@ classdef RetrievalBenchmarkCNN < benchmarks.GenericBenchmark ...
       % Divide the dataset into chunks
       imgsPerChunk = min(obj.Opts.maxNumImagesPerSearch,numImages);
       numChunks = ceil(numImages/imgsPerChunk);
-      knns = cell(numChunks,1); % as image indexes
-      knnDists = cell(numChunks,1);
+      ids = cell(numChunks,1); % as image indexes
+      dists = cell(numChunks,1);
       numDescriptors = cell(1,numChunks);
       obj.info('Dataset has been divided into %d chunks.',numChunks);
 
@@ -70,13 +69,12 @@ classdef RetrievalBenchmarkCNN < benchmarks.GenericBenchmark ...
       queryDescriptors = obj.gatherQueriesDescriptors(dataset, featExtractor);
       numQueryDescriptors = cellfun(@(a) size(a,2),queryDescriptors);
 
-      % Compute KNNs for all image chunks
+      % Compute dists for all image chunks
       for chNum = 1:numChunks
         firstImageNo = (chNum-1)*imgsPerChunk+1;
         lastImageNo = min(chNum*imgsPerChunk,numImages);
-        [knns{chNum}, knnDists{chNum}, numDescriptors{chNum}] = ...
-          obj.computeKnns(dataset,featExtractor,queryDescriptors,...
-          firstImageNo,lastImageNo);
+        [ids{chNum}, dists{chNum}, numDescriptors{chNum}] = ...
+          obj.computeDistances(dataset,featExtractor,queryDescriptors,firstImageNo,lastImageNo);
       end
       % Compute the AP
       numDescriptors = cell2mat(numDescriptors);
@@ -86,29 +84,23 @@ classdef RetrievalBenchmarkCNN < benchmarks.GenericBenchmark ...
       rankedLists = zeros(numImages,numQueries);
       votes = zeros(numImages,numQueries);
       for q=1:numQueries
-        % Combine knns of all descriptors from all chunks
-        allQKnns = cell(numChunks,1);
-        allQKnnDists = cell(numChunks,1);
+        % Combine distances of all descriptors from all chunks
+        allQIds = cell(numChunks,1);
+        allQDists = cell(numChunks,1);
         for ch = 1:numChunks
-          allQKnns{ch} = knns{ch}{q};
-          allQKnnDists{ch} = knnDists{ch}{q};
+          allQIds{ch} = ids{ch}{q}';
+          allQDists{ch} = dists{ch}{q}';
         end
-        allQKnns = cell2mat(allQKnns(~cellfun('isempty',allQKnns)));
-        allQKnnDists = cell2mat(allQKnnDists(~cellfun('isempty',allQKnnDists)));
+        allQIds = cell2mat(allQIds(~cellfun('isempty',allQIds)));
+        allQDists = cell2mat(allQDists(~cellfun('isempty',allQDists)));
 
         % Sort them by the distance to the query descriptors
-        [allQKnnDists ind] = sort(allQKnnDists,1,'ascend');
-        for qd = 1:size(allQKnnDists,2)
-           allQKnns(:,qd) = allQKnns(ind(:,qd),qd);
-        end
-        % Pick the upper k
-        fk = min(obj.Opts.k,size(allQKnns,2));
-        allQKnns = allQKnns(1:fk,:);
-        allQKnnDists = allQKnnDists(1:fk,:);
+        [allQDists ind] = sort(allQDists,1,'ascend');
+        allQIds = allQIds(ind);
 
         query = dataset.getQuery(q);
         [queriesAp(q) rankedLists(:,q) votes(:,q)] = ...
-          obj.computeAp(allQKnns, allQKnnDists, numDescriptors, query);
+          obj.computeAp(allQIds, allQDists, numDescriptors, query);
         obj.info('Average precision of query %d: %f',q,queriesAp(q));
       end
 
@@ -132,8 +124,7 @@ classdef RetrievalBenchmarkCNN < benchmarks.GenericBenchmark ...
   end
 
   methods (Access=protected, Hidden)
-    function qDescriptors = gatherQueriesDescriptors(obj, dataset, ...
-        featExtractor)
+    function qDescriptors = gatherQueriesDescriptors(obj, dataset, featExtractor)
       % gatherQueriesDescriptors Compute queries descriptors
       %   Q_DESCRIPTORS = obj.gatherQueriesDescriptors(DATASET,FEAT_EXTRACT)
       %   computes Q_DESCRIPTORS, cell array of size 
@@ -150,85 +141,38 @@ classdef RetrievalBenchmarkCNN < benchmarks.GenericBenchmark ...
         bbox = query.box + 1;
         imgPath = dataset.getImagePath(query.imageId);
         [qFrames qDescriptors{q}] = featExtractor.extractFeatures(imgPath);
-        % Pick only features in the query box
-        visibleFrames = ...
-          bbox(1) < qFrames(1,:) & ...
-          bbox(2) < qFrames(2,:) & ...
-          bbox(3) > qFrames(1,:) & ...
-          bbox(4) > qFrames(2,:) ;
-        qDescriptors{q} = qDescriptors{q}(:,visibleFrames);
         obj.info('Query %d: %d features.',q,size(qDescriptors{q},2));
       end
     end
 
-    function [ap rankedList votes] = computeAp(obj, knnImgIds, knnDists,...
-        numDescriptors, query)
-      % computeAp Compute average precision from KNN results
-      %   [AP RANKED_LIST VOTES] = obj.computeAp(KNN_IMG_IDS, KNN_DISTS,
-      %      NUM_DESCRIPTORS, QUERY) Compute average precision of the
-      %   results of K-nearest neighbours search. Result of this search is
-      %   set of K descriptors for each query descriptors.
-      %   Array KNN_IMG_IDS has size [K,QUERY_DESCRIPTORS_NUM] and value
-      %   KNN_IMG_IDS(N,I) is the ID of the image in which the
-      %   N-nearest neighbour desc. of the Ith query descriptor was found.
-      %   Array KNN_DISTS has size [K,QUERY_DESCRIPTORS_NUM] and value
-      %   KNN_DISTS(N,I) is the distance of the N-Nearest descriptor to the
-      %   Ith query descriptor.
-      %   Array NUM_DESCRIPTORS of size [1, NUM_IMAGES_IN_DB] contains the
-      %   number of descriptors extracted from the database images.
+    function [ap rankedList votes] = computeAp(obj, imgIds, dists, numDescriptors, query)
       import helpers.*;
 
-      if isempty(knnImgIds)
-        numImages = numel(numDescriptors);
+      numImages = numel(numDescriptors);
+      
+      if isempty(imgIds)
         ap = 0; rankedList = zeros(numImages,1); 
         votes = zeros(numImages,1); return;
       end
-
-      k = obj.Opts.k;
-      numImages = numel(numDescriptors);
-      qNumDescriptors = size(knnImgIds,2);
-
-      votes= vl_binsum( single(zeros(numImages,1)),...
-        repmat( knnDists(end,:), min(k,qNumDescriptors), 1 ) - knnDists,...
-        knnImgIds );
-      votes = votes./sqrt(max(numDescriptors',1))./sqrt(max(qNumDescriptors,1));
+      
+      votes = vl_binsum( single(zeros(numImages,1)),...
+        repmat( dists(end), size(dists, 1), 1 ) - dists,...
+        imgIds );
+      votes = votes ./ sqrt(max(numDescriptors',1));
       [votes, rankedList]= sort(votes, 'descend'); 
 
       ap = obj.rankedListAp(query, rankedList);
     end
-
-    function [queriesKnns, queriesKnnDists numDescriptors] = ...
-        computeKnns(obj, dataset, featExtractor, qDescriptors, firstImageNo,...
-        lastImageNo)
-      % computeKnns Compute the K-nearest neighbours of query descriptors
-      %   [QUERIES_KNNS KNNS_DISTS, NUM_DESCRIPTORS] = computeKnns(DATASET,
-      %     FEAT_EXTRACTOR, QUERIES_DESCRIPTORS, FIRST_IMG_NO, LAST_IMG_NO)
-      %   computes KNN of all query descriptors in the database from all
-      %   descriptors extracted from images [FIRST_IMG_NO, LAST_IMG_NO].
-      %
-      %   QUERIES_DESCRIPTORS is a cell array of size [1, DATASET.NumQueries]
-      %   Array QUERIES_DESCRIPTORS{QID} contain all the descriptors 
-      %   QID_DESCRIPTORS extracted by FEAT_EXTRACTOR in the query QID 
-      %   bounding box. This array size is [DESC_SIZE,QID_DESCRIPTORS_NUM].
-      %
-      %   QUERIES_KNNS and KNNS_DISTS are cell arrays of size 
-      %   [1, DATASET.NumQueries].
-      %   Array QUERIES_KNNS{QID} has size [K,QID_DESCRIPTORS_NUM] and value
-      %   QUERIES_KNNS{QID}(N,I) is the ID of the image in which the
-      %   N-nearest neighbour desc. of the Ith query QID descriptor was found.
-      %   Array KNN_DISTS has size [K,QUERY_DESCRIPTORS_NUM] and value
-      %   KNN_DISTS(N,I) is the distance of the N-Nearest descriptor to the
-      %   Ith query descriptor.
-      %
-      %   Array NUM_DESCRIPTORS of size [1, NUM_IMAGES_IN_DB] contains the
-      %   number of descriptors extracted from the database images.
+    
+    function [queriesIdxs, queriesDists, numDescriptors] = ...
+        computeDistances(obj, dataset, featExtractor, qDescriptors, firstImageNo, lastImageNo)
+      
       import helpers.*;
       startTime = tic;
       numQueries = dataset.NumQueries;
-      k = obj.Opts.k;
       numImages = lastImageNo - firstImageNo + 1;
-      queriesKnns = cell(1,numQueries);
-      queriesKnnDists = cell(1,numQueries);
+      queriesIdxs = cell(1,numQueries);
+      queriesDists = cell(1,numQueries);
 
       testSignature = obj.getSignature;
       detSignature = featExtractor.getSignature;
@@ -237,21 +181,20 @@ classdef RetrievalBenchmarkCNN < benchmarks.GenericBenchmark ...
       % Try to load already computed queries
       isCachedQuery = false(1,numQueries);
       nonCachedQueries = 1:numQueries;
-      knnsResKeys = cell(1,numQueries);
-      imgsInfoKey = strcat(obj.DatasetChunkInfoPrefix, testSignature,...
-          detSignature, imagesSignature);
+      distsResKeys = cell(1,numQueries);
+      imgsInfoKey = strcat(obj.DatasetChunkInfoPrefix, testSignature, detSignature, imagesSignature);
       cacheResults = featExtractor.UseCache && obj.UseCache;
       if cacheResults
         for q = 1:numQueries
           querySignature = dataset.getQuerySignature(q);
-          knnsResKeys{q} = strcat(obj.QueryKnnsKeyPrefix, testSignature,...
-            detSignature, imagesSignature, querySignature);
-          qKnnResults = DataCache.getData(knnsResKeys{q});
-          if ~isempty(qKnnResults);
+          distsResKeys{q} = strcat(obj.QueryDistancesPrefix, testSignature,...
+              detSignature, imagesSignature, querySignature);
+          qDistsResults = DataCache.getData(distsResKeys{q});
+          if ~isempty(qDistsResults);
             isCachedQuery(q) = true;
-            [queriesKnns{q} queriesKnnDists{q}] = qKnnResults{:};
-            obj.debug('Query KNNs %d for images %d:%d loaded from cache.',...
-              q,firstImageNo, lastImageNo);
+            [queriesIdxs{q}, queriesDists{q}] = qDistsResults{:};
+            obj.debug('Query distances for images %d:%d loaded from cache.',...
+              firstImageNo, lastImageNo);
           end
         end
         nonCachedQueries = find(~isCachedQuery);
@@ -265,36 +208,35 @@ classdef RetrievalBenchmarkCNN < benchmarks.GenericBenchmark ...
       end
 
       % Retreive features of the images
-      [descriptors imageIdxs numDescriptors] = ...
-        obj.getDatasetFeatures(dataset,featExtractor,firstImageNo,...
-        lastImageNo);
+      [descriptors, imageIdxs, numDescriptors] = ...
+        obj.getDatasetFeatures(dataset,featExtractor,firstImageNo,lastImageNo);
 
       if cacheResults
         DataCache.storeData(imgsInfoKey,numDescriptors);
       end
 
-      % Compute the KNNs
+      % Compute distances
       helpers.DataCache.disableAutoClear();
-      queriesKnnDistsTmp = cell(1,numel(nonCachedQueries)) ;
-      queriesKnnsTmp = cell(1,numel(nonCachedQueries)) ;
+      queriesDistsTmp = cell(1,numel(nonCachedQueries)) ;
+      queriesIdxsTmp = cell(1,numel(nonCachedQueries)) ;
       parfor qi = 1:numel(nonCachedQueries)
         q = nonCachedQueries(qi) ;
-        obj.info('Imgs %d:%d - Computing KNNs for query %d/%d.',...
+        obj.info('Imgs %d:%d - Computing distances for query %d/%d.',...
           firstImageNo,lastImageNo,q,numQueries);
-        [knnDescIds, queriesKnnDistsTmp{qi}] = ...
-          obj.computeKnn(descriptors, qDescriptors{q});
-        queriesKnnsTmp{qi} = imageIdxs(knnDescIds);
+        queriesDistsTmp{qi} = ...
+          obj.computeDistance(descriptors, qDescriptors{q});
+        queriesIdxsTmp{qi} = firstImageNo:lastImageNo;
         if cacheResults
-          DataCache.storeData({queriesKnnsTmp{qi}, queriesKnnDistsTmp{qi}},...
-            knnsResKeys{q});
+          DataCache.storeData({queriesIdxsTmp{qi}, queriesDistsTmp{qi}},...
+            distsResKeys{q});
         end
       end
-      queriesKnnDists(nonCachedQueries) = queriesKnnDistsTmp ;
-      queriesKnns(nonCachedQueries) = queriesKnnsTmp ;
-      clear queriesKnnDistsTmp queriesKnnsTmp ;
+      queriesDists(nonCachedQueries) = queriesDistsTmp ;
+      queriesIdxs(nonCachedQueries) = queriesIdxsTmp ;
+      clear queriesDistsTmp queriesIdxsTmp ;
       helpers.DataCache.enableAutoClear();
-      obj.debug('All %d-NN for %d images computed in %gs.',...
-        k, numImages, toc(startTime));
+      obj.debug('All distances for %d images computed in %gs.',...
+        numImages, toc(startTime));
     end
     
     function dists = computeDistance(obj, descriptors, qDescriptors)
@@ -315,12 +257,13 @@ classdef RetrievalBenchmarkCNN < benchmarks.GenericBenchmark ...
 
       obj.info('Computing distances between %d descs in db and %d descs.',...
         qNumDescriptors,size(descriptors,2));
-      dists = obj.imageDistances(qDescriptors,descriptors,obj.NumPatchesPerImage,numImages);
+
+      dists = obj.imageDistances(qDescriptors,descriptors,numImages);
 
       obj.debug('Distances calculated in %fs.',toc(startTime));
     end
 
-    function [descriptors imageIdxs numDescriptors] = ...
+    function [descriptors, imageIdxs, numDescriptors] = ...
         getDatasetFeatures(obj, dataset, featExtractor, firstImageNo, lastImageNo)
       % getDatasetFeatures Get all extr. features from the dataset
       %   [DESCS IMAGE_IDXS NUM_DESCS] = obj.getDatasetFeatures(DATASET,
@@ -365,39 +308,23 @@ classdef RetrievalBenchmarkCNN < benchmarks.GenericBenchmark ...
       imageIdxs = [imageIdxs{:}];
     end
   end
-
+  
+  methods (Access = private)
+      function dists = imageDistances(obj, qDescriptors, descriptors, numImages)
+        descriptorsPairwiseDistMatrix = obj.pairwiseDistance(qDescriptors, descriptors);
+        imagesPairwiseDistTable = reshape(descriptorsPairwiseDistMatrix, ...
+            [obj.NumPatchesPerImage, obj.NumPatchesPerImage, numImages]);
+        minDescToDescDistanceMatrix = reshape(min(imagesPairwiseDistTable, [], 2), ...
+            [obj.NumPatchesPerImage, numImages]);
+        dists = mean(minDescToDescDistanceMatrix);
+      end
+  end
+  
   methods (Access = protected)
     function deps = getDependencies(obj)
       import helpers.*;
       deps = {Installer(),benchmarks.helpers.Installer(),...
         VlFeatInstaller('0.9.15'),YaelInstaller()};
-    end
-    
-    function dists = imageDistances(qDescriptors, descriptors, numPatchesPerImage, numImages)
-        descriptorsPairwiseDistMatrix = pairwiseDistance(qDescriptors, descriptors);
-        imagesPairwiseDistTable = reshape(descriptorsPairwiseDistMatrix, ...
-            [numPatchesPerImage, numPatchesPerImage, numImages]);
-        minDescToDescDistanceMatrix = reshape(min(imagesPairwiseDistTable, [], 2), ...
-            [numPatchesPerImage, numImages]);
-        dists = mean(minDescToDescDistanceMatrix);
-    end
-    
-    function res = pairwiseDistance(X, Y)
-    % res = pairwiseDistance(X, Y)
-    % Computes pairwise distance matrix for vector in columns of X and Y, i.e.
-    % X is k-by-n matrix and Y is k-by-m matrix
-    % result matrix is n-by-m
-    %
-
-        Xsize = size(X, 2);
-        Ysize = size(Y, 2);
-
-        % (x - y, x - y) = (x, x) - 2(x, y) + (y, y)
-        X = X';
-        X_norm = repmat(sum(X .^ 2, 2), 1, Ysize);
-        Y_norm = repmat(sum(Y .^ 2), Xsize, 1);
-        res = X_norm - 2 * X * Y + Y_norm;
-
     end
   end
 
@@ -424,9 +351,53 @@ classdef RetrievalBenchmarkCNN < benchmarks.GenericBenchmark ...
       labels(query.imageId) = 1;
       rankedLabels = labels(rankedList);
 
-      [recall precision info] = vl_pr(rankedLabels, numImages:-1:1);
+      [recall, precision, info] = vl_pr(rankedLabels, numImages:-1:1);
       ap = info.auc;
     end
-  end  
+    
+    function [auc, tpr, tnr] = rankedListRoc(query, rankedList)
+      % rankedListRoc Calculate roc-score of retrieved images
+      %   AUC = rankedListRoc(QUERY, RANKED_LIST) Compute area under ROC curve 
+      %   of retrieved images (their ids) by QUERY, sorted by their 
+      %   relevancy in RANKED_LIST.
+      %
+      %   [AUC TPR TNR] = rankedListAp(...) Return also true-positive and
+      %   true-negative rates.
+
+      % make sure each image appears at most once in the rankedList
+      [temp,inds]=unique(rankedList,'first');
+      rankedList= rankedList( sort(inds) );
+
+      numImages = numel(rankedList);
+      labels = - ones(1, numImages);
+      labels(query.good) = 1;
+      labels(query.ok) = 1;
+      labels(query.junk) = 0;
+      labels(query.imageId) = 1;
+      rankedLabels = labels(rankedList);
+
+      [tpr, tnr, info] = vl_roc(rankedLabels, numImages:-1:1);
+      auc = info.auc;
+    end
+  end
+  
+  methods (Static, Access = private)
+    function res = pairwiseDistance(X, Y)
+    % res = pairwiseDistance(X, Y)
+    % Computes pairwise distance matrix for vector in columns of X and Y, i.e.
+    % X is k-by-n matrix and Y is k-by-m matrix
+    % result matrix is n-by-m
+    %
+
+      Xsize = size(X, 2);
+      Ysize = size(Y, 2);
+      
+      % (x - y, x - y) = (x, x) - 2(x, y) + (y, y)
+      X = X';
+      X_norm = repmat(sum(X .^ 2, 2), 1, Ysize);
+      Y_norm = repmat(sum(Y .^ 2), Xsize, 1);
+      res = X_norm - 2 * X * Y + Y_norm;
+    end
+  end
 end
 
