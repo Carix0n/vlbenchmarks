@@ -7,7 +7,10 @@ classdef NeuralCodesFeatureExtractor < helpers.GenericInstaller ...
       'levels', 1,... % Generated scales -- scalar or 1d array
       'netPath', '',... % Path to pre-trained model to be used
       'useGpu', false,... % Whether or not to use GPU
-      'layerName', 'fc6'... % Layer which output is to be used as image descriptor
+      'layerName', 'fc6',... % Layer which output is to be used as image descriptor
+      'usePCA', false,... % Whether or not to use dimensionality reduction
+      'dim', 4096,... % Number of dimensions to be used in PCA
+      'useWhitening', false... %W Whether or not to use whitening
       );
     Net;
     outputSize;
@@ -157,6 +160,11 @@ classdef NeuralCodesFeatureExtractor < helpers.GenericInstaller ...
           descriptors = gather(descriptors);    
       end
       
+      % Apply PCA if necessary
+      if obj.Opts.usePCA
+        descriptors = obj.applyPCA(descriptors, obj.Opts.dim, obj.Opts.useWhitening);
+      end
+      
       elapsedTime = toc(startTime);
       obj.debug('Descriptors computed in %gs',elapsedTime);
       % This method does not cache the computed values as it is complicated
@@ -175,6 +183,55 @@ classdef NeuralCodesFeatureExtractor < helpers.GenericInstaller ...
     end
   end
 
+  
+  methods(Access=private)
+    function Xscaled = dataScale(~, X, withMean, withStd)
+      % XSCALED = DATASCALE(OBJ, X, WITHMEAN, WITHSTD) preprocesses data
+      % optionally with subtracting mean and dividing by standard deviation
+      %
+      
+      nsamples = size(X, 2);
+      Xscaled = X;
+      
+      if withMean
+        Xscaled = Xscaled - repmat(mean(X, 2), 1, nsamples);
+      end
+      
+      if withStd
+        Xscaled = Xscaled ./ repmat(std(X, [], 2), 1, nsamples);
+      end
+    end
+    
+    function [U, S] = svdUS(~, X)
+      % PCA Run principal component analysis on the dataset X
+      % Samples in X should be column-wise, not row-wise like in most cases
+      % U, S = svdUS(obj, X) computes eigenvectors and eigenvalues of the covariance matrix of X
+      % Returns the eigenvectors U and eigenvalues S
+      %
+      
+      [~, nsamples] = size(X);
+      covarianceMatrix = X * X' ./ (nsamples - 1);
+      [U, S, ~] = svd(covarianceMatrix);
+    end
+    
+    function Xreduced = applyPCA(obj, X, K, whitening)
+      % XREDUCED = APPLYPCA(OBJ, X, K, WHITENING) applies principal-component
+      % demensionality reduction with optional whitening
+      %
+      
+      X = obj.dataScale(X, true, true);
+      [U, S] = obj.svdUS(X);    
+      Ureduce = U(:, 1:K)';
+      
+      if whitening
+        Ureduce = Ureduce / sqrt(S);
+      end
+      
+      Xreduced = Ureduce * X;
+      Xreduced = obj.dataScale(Xreduced, true, true);
+    end
+  end
+  
   methods(Static)
     %  Because this class is is subclass of GenericInstaller it can benefit
     %  from its support. When GenericInstaller.install() method is called,

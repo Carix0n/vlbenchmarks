@@ -310,14 +310,35 @@ classdef RetrievalBenchmarkCNN < benchmarks.GenericBenchmark ...
   end
   
   methods (Access = private)
-      function dists = imageDistances(obj, qDescriptors, descriptors, numImages)
-        descriptorsPairwiseDistMatrix = obj.pairwiseDistance(qDescriptors, descriptors);
-        imagesPairwiseDistTable = reshape(descriptorsPairwiseDistMatrix, ...
-            [obj.NumPatchesPerImage, obj.NumPatchesPerImage, numImages]);
-        minDescToDescDistanceMatrix = reshape(min(imagesPairwiseDistTable, [], 2), ...
-            [obj.NumPatchesPerImage, numImages]);
-        dists = mean(minDescToDescDistanceMatrix);
-      end
+    % DISTS = IMAGEDISTANCES(OBJ, QDESCRIPTORS, DESCRIPTORS, NUMIMAGES)
+    % computes pairwise distances between samples from two matrices
+    %
+    
+    function dists = imageDistances(obj, qDescriptors, descriptors, numImages)
+      descriptorsPairwiseDistMatrix = obj.pairwiseDistance(qDescriptors, descriptors);
+      imagesPairwiseDistTable = reshape(descriptorsPairwiseDistMatrix, ...
+          [obj.NumPatchesPerImage, obj.NumPatchesPerImage, numImages]);
+      minDescToDescDistanceMatrix = reshape(min(imagesPairwiseDistTable, [], 2), ...
+          [obj.NumPatchesPerImage, numImages]);
+      dists = mean(minDescToDescDistanceMatrix);
+    end
+    
+    function res = pairwiseDistance(~, X, Y)
+    % RES = PAIRWISEDISTANCE(OBJ, X, Y)
+    % Computes pairwise distance matrix for vector in columns of X and Y, i.e.
+    % X is k-by-n matrix and Y is k-by-m matrix
+    % result matrix is n-by-m
+    %
+
+      Xsize = size(X, 2);
+      Ysize = size(Y, 2);
+      
+      % (x - y, x - y) = (x, x) - 2(x, y) + (y, y)
+      X = X';
+      X_norm = repmat(sum(X .^ 2, 2), 1, Ysize);
+      Y_norm = repmat(sum(Y .^ 2), Xsize, 1);
+      res = X_norm - 2 * X * Y + Y_norm;
+    end
   end
   
   methods (Access = protected)
@@ -329,7 +350,7 @@ classdef RetrievalBenchmarkCNN < benchmarks.GenericBenchmark ...
   end
 
   methods(Static)
-    function [ap recall precision] = rankedListAp(query, rankedList)
+    function [ap, recall, precision] = rankedListAp(query, rankedList)
       % rankedListAp Calculate average precision of retrieved images
       %   AP = rankedListAp(QUERY, RANKED_LIST) Compute average precision 
       %   of retrieved images (their ids) by QUERY, sorted by their 
@@ -378,25 +399,6 @@ classdef RetrievalBenchmarkCNN < benchmarks.GenericBenchmark ...
 
       [tpr, tnr, info] = vl_roc(rankedLabels, numImages:-1:1);
       auc = info.auc;
-    end
-  end
-  
-  methods (Static, Access = private)
-    function res = pairwiseDistance(X, Y)
-    % res = pairwiseDistance(X, Y)
-    % Computes pairwise distance matrix for vector in columns of X and Y, i.e.
-    % X is k-by-n matrix and Y is k-by-m matrix
-    % result matrix is n-by-m
-    %
-
-      Xsize = size(X, 2);
-      Ysize = size(Y, 2);
-      
-      % (x - y, x - y) = (x, x) - 2(x, y) + (y, y)
-      X = X';
-      X_norm = repmat(sum(X .^ 2, 2), 1, Ysize);
-      Y_norm = repmat(sum(Y .^ 2), Xsize, 1);
-      res = X_norm - 2 * X * Y + Y_norm;
     end
   end
 end
